@@ -1,5 +1,5 @@
 name: "Syslog (HL42)"
-version: "0.6.0-hl.3"
+version: "1.0.0"
 slug: "syslog"
 description: "Send your HAOS logs to a remote syslog server, without losing them on restarts and outages"
 url: "https://github.com/tsukasa-HL42/ha-addon-syslog"

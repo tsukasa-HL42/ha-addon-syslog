@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.0
+
+First stable release of the HL42 fork, the code of 0.6.0-hl.3 unchanged.
+Major version: the forwarder is rewritten, the image moves to Debian 13, the
+app is built locally, and the delivery guarantees differ from upstream 0.6.0.
+
+Proven on a running HAOS host, read on the receiving server:
+
+- update of the app (0.6.0-hl.2 to 0.6.0-hl.3): no second without entries
+- reboot of HAOS: the shutdown and the whole boot of HAOS received, the
+  kernel included, written before the app was running again
+- server vanished without closing the connection, for 6 min 38 s: detected
+  after 33 s; on return, the whole backlog received with its own times and
+  no gap (a message written every 10 s present without exception); with
+  0.6.0-hl.2, the 31 s following the outage were lost
+
 ## 0.6.0-hl.3
 
 - No loss when the server vanishes without closing the connection: over
