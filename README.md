@@ -48,10 +48,14 @@ outre :
   une quand il revient ;
 - un banc d'essai hors ligne (`tests/`).
 
-Limites connues : après un arrêt brutal, les entrées des 5 dernières secondes
-peuvent être envoyées deux fois ; une connexion TCP morte est détectée en
-environ 30 secondes, et ce qui lui a été confié pendant ce temps peut être
-perdu ; en UDP, une perte n'est jamais vue. Le détail des options et du
+En TCP sous Linux, une entrée ne compte comme envoyée qu'une fois ses octets
+acquittés par le serveur : un serveur qui disparaît sans fermer la connexion
+(détecté en environ 30 secondes) coûte des doublons, pas des pertes.
+
+Limites connues : après un arrêt brutal ou une coupure, quelques entrées
+peuvent être reçues deux fois ; en TLS, les acquittements ne se mesurent
+pas et les 30 dernières secondes avant la disparition du serveur peuvent
+être perdues ; en UDP, une perte n'est jamais vue. Le détail des options et du
 comportement est dans `syslog/DOCS.md`, affiché aussi dans l'onglet
 *Documentation* du module.
 

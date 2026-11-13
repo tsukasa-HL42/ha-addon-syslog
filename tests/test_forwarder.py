@@ -53,6 +53,8 @@ class Receiver:
 
     def start(self) -> None:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # restarted on the same port: Linux keeps it in TIME_WAIT otherwise
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind(("127.0.0.1", self.port))
         server.listen(5)
         self.port = server.getsockname()[1]
@@ -474,6 +476,13 @@ class DeliveryTests(Bench):
         self.assertTrue(self.wait_until(lambda: "sending again" in self.output(), 5), self.output())
         self.assertEqual(self.output().count("cannot send"), 1, self.output())
 
+    def test_own_messages_timestamped(self):
+        """The app's own lines start with the time, like bashio's."""
+        self.start_synced()
+        self.assertRegex(
+            self.output(), r"(?m)^\[\d{2}:\d{2}:\d{2}\] INFO: forwarding to "
+        )
+
     def test_unresolvable_host_keeps_running(self):
         """A server name that does not resolve is retried, not fatal."""
         self.extra_env["SYSLOG_HOST"] = "absent.invalid"
@@ -489,7 +498,9 @@ class DeliveryTests(Bench):
         first = self.start_synced()
         self.append("before stop")
         self.wait_for_bodies("before stop")
-        time.sleep(0.5)  # let the position be saved
+        # a hard kill keeps only what was acknowledged and saved: acknowledgements
+        # are checked within the 1 s journal wait, the position saved every 0.1 s
+        time.sleep(1.5)
         first.kill()
         first.wait(timeout=10)
         self.append("while stopped 1")
@@ -498,6 +509,23 @@ class DeliveryTests(Bench):
         self.append("after restart")
         self.wait_for_bodies("while stopped 1", "while stopped 2", "after restart", timeout=15)
         self.assertEqual(self.receiver.bodies().count("before stop"), 1)
+
+    @unittest.skipUnless(os.name == "posix", "SIGTERM is a hard kill on Windows")
+    def test_clean_stop_does_not_resend(self):
+        """
+        A stop by SIGTERM (the Supervisor) saves the position: no duplicate.
+        On loopback the acknowledgement is immediate, so the wait itself is
+        proven by AcknowledgementTests.test_stop_waits_for_acknowledgements.
+        """
+        first = self.start_synced()
+        self.append("just before stop")
+        self.wait_for_bodies("just before stop")
+        first.terminate()
+        self.assertEqual(first.wait(timeout=10), 0)
+        self.start()
+        self.append("after clean restart")
+        self.wait_for_bodies("after clean restart", timeout=15)
+        self.assertEqual(self.receiver.bodies().count("just before stop"), 1)
 
     def test_backlog_is_capped(self):
         """A saved position older than BACKLOG_MAX_HOURS resumes at the cap."""
@@ -526,52 +554,205 @@ class DeliveryTests(Bench):
         self.assertNotIn("already sent", self.receiver.bodies())
 
 
-# -- socket options --------------------------------------------------------------
+# -- in-process tests ------------------------------------------------------------
+def load_script(test: unittest.TestCase):
+    """Import the script under test with the fake systemd, without running it."""
+    env = {
+        "SYSLOG_HOST": "127.0.0.1", "SYSLOG_PORT": "9", "SYSLOG_PROTO": "tcp",
+        "SYSLOG_SSL": "false", "SYSLOG_SSL_VERIFY": "false",
+        "SYSLOG_FORMAT": "rfc5424", "HAOS_HOSTNAME": HOST,
+        "FAKE_JOURNAL": os.devnull,
+    }
+    saved = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+    sys.path.insert(0, FAKE)
+    # no __pycache__ next to the script: the syslog folder is copied to HAOS
+    saved_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec = importlib.util.spec_from_file_location("j2s_under_test", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module  # needed by dataclasses
+        test.addCleanup(sys.modules.pop, spec.name, None)
+        done = threading.Event()
+
+        def load():
+            try:
+                spec.loader.exec_module(module)
+            finally:
+                done.set()
+
+        threading.Thread(target=load, daemon=True).start()
+        test.assertTrue(done.wait(5), "importing the script runs the forwarder")
+        return module
+    finally:
+        sys.dont_write_bytecode = saved_bytecode
+        sys.path.remove(FAKE)
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 class SocketOptionTests(unittest.TestCase):
     def test_stream_socket_detects_dead_peer(self):
         """Stream sockets get a timeout and TCP keepalive (dead peer detection)."""
-        env = {
-            "SYSLOG_HOST": "127.0.0.1", "SYSLOG_PORT": "9", "SYSLOG_PROTO": "tcp",
-            "SYSLOG_SSL": "false", "SYSLOG_SSL_VERIFY": "false",
-            "SYSLOG_FORMAT": "rfc5424", "HAOS_HOSTNAME": HOST,
-            "FAKE_JOURNAL": os.devnull,
-        }
-        saved = {k: os.environ.get(k) for k in env}
-        os.environ.update(env)
-        sys.path.insert(0, FAKE)
-        # no __pycache__ next to the script: the syslog folder is copied to HAOS
-        self.addCleanup(setattr, sys, "dont_write_bytecode", sys.dont_write_bytecode)
-        sys.dont_write_bytecode = True
+        module = load_script(self)
+        self.assertTrue(hasattr(module, "configure_stream_socket"))
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            spec = importlib.util.spec_from_file_location("j2s_under_test", SCRIPT)
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[spec.name] = module  # needed by dataclasses
-            self.addCleanup(sys.modules.pop, spec.name, None)
-            done = threading.Event()
-
-            def load():
-                try:
-                    spec.loader.exec_module(module)
-                finally:
-                    done.set()
-
-            threading.Thread(target=load, daemon=True).start()
-            self.assertTrue(done.wait(5), "importing the script runs the forwarder")
-            self.assertTrue(hasattr(module, "configure_stream_socket"))
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            try:
-                module.configure_stream_socket(sock)
-                self.assertEqual(sock.gettimeout(), 10)
-                self.assertNotEqual(sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE), 0)
-            finally:
-                sock.close()
+            module.configure_stream_socket(sock)
+            self.assertEqual(sock.gettimeout(), 10)
+            self.assertNotEqual(sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE), 0)
         finally:
-            sys.path.remove(FAKE)
-            for key, value in saved.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
+            sock.close()
+
+    def test_unacknowledged_bytes_measured(self):
+        """Linux: bytes not yet acknowledged by the server are measured."""
+        module = load_script(self)
+        receiver = Receiver()
+        self.addCleanup(receiver.stop)
+        cfg = module.Config(
+            host="127.0.0.1", port=receiver.port, proto="tcp", use_ssl=False,
+            ssl_verify=False, fmt="rfc5424", hostname=HOST,
+        )
+        transport = module.Transport(cfg)
+        self.addCleanup(transport.close)
+        transport.send(b"x" * 100)
+        self.assertEqual(transport.sent_bytes, len(b"100 ") + 100)
+        if sys.platform.startswith("linux"):
+            deadline = time.monotonic() + 5
+            while transport.unacked() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(transport.unacked(), 0)
+        else:
+            self.assertIsNone(transport.unacked(), "no SIOCOUTQ outside Linux")
+
+
+class FakeLink:
+    """
+    Transport stand-in that models TCP acknowledgements: a payload reaches the
+    server only once acknowledged. When the server vanishes, what was sent
+    but not acknowledged is lost, as in the kernel send buffer.
+    """
+
+    def __init__(self) -> None:
+        self.generation = 0
+        self.sent_bytes = 0
+        self.connected = False
+        self.vanished = False
+        self.failing_connects = 0
+        self.unacked_payloads: list = []
+        self.received: list = []
+
+    def connect(self) -> None:
+        if self.failing_connects:
+            self.failing_connects -= 1
+            raise TimeoutError("timed out")
+        self.connected = True
+        self.vanished = False
+        self.generation += 1
+        self.sent_bytes = 0
+        self.unacked_payloads = []
+
+    def send(self, payload: bytes) -> None:
+        if self.vanished and self.connected:
+            raise TimeoutError("timed out")
+        if not self.connected:
+            self.connect()
+        self.sent_bytes += len(payload)
+        self.unacked_payloads.append(payload)
+
+    def unacked(self) -> int:
+        return sum(len(p) for p in self.unacked_payloads)
+
+    def acknowledge(self) -> None:
+        self.received += self.unacked_payloads
+        self.unacked_payloads = []
+
+    def vanish(self, failing_connects: int) -> None:
+        """Server gone without a reset; the next connects time out."""
+        self.vanished = True
+        self.failing_connects = failing_connects
+
+    def close(self) -> None:
+        self.connected = False
+
+
+class AcknowledgementTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.module = load_script(self)
+        self.dir = tempfile.mkdtemp(prefix="j2s-ack-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.cfg = self.module.Config(
+            host="127.0.0.1", port=9, proto="tcp", use_ssl=False, ssl_verify=False,
+            fmt="rfc5424", hostname=HOST, state_dir=self.dir, retry_max_seconds=0.01,
+        )
+        self.link = FakeLink()
+        self.forwarder = self.module.Forwarder(self.cfg, transport=self.link)
+        now = datetime.now(timezone.utc)
+        self.entries = [
+            {
+                "MESSAGE": f"entry {i}",
+                "PRIORITY": 6,
+                "SYSLOG_IDENTIFIER": "test",
+                "__CURSOR": f"s={i}",
+                "__REALTIME_TIMESTAMP": now + timedelta(milliseconds=i),
+            }
+            for i in range(10)
+        ]
+
+    def received(self) -> list:
+        return [parse(p.decode("utf-8"))["msg"] for p in self.link.received]
+
+    def test_unacknowledged_entries_resent_after_dead_peer(self):
+        """Entries the server never acknowledged are sent again, none is lost."""
+        fwd, link = self.forwarder, self.link
+        for entry in self.entries[:4]:
+            self.assertTrue(fwd.deliver(entry))
+        link.acknowledge()
+        fwd.refresh_acks()
+        self.assertEqual(fwd.position.cursor, "s=3")
+
+        for entry in self.entries[4:8]:  # handed to the kernel, never acknowledged
+            self.assertTrue(fwd.deliver(entry))
+        fwd.refresh_acks()
+        self.assertEqual(fwd.position.cursor, "s=3", "position moved past unacknowledged entries")
+
+        link.vanish(failing_connects=2)
+        self.assertTrue(fwd.deliver(self.entries[8]))
+        self.assertTrue(fwd.deliver(self.entries[9]))
+        link.acknowledge()
+        fwd.refresh_acks()
+
+        received = self.received()
+        for i in range(10):
+            self.assertIn(f"entry {i}", received)
+        self.assertEqual(received.count("entry 4"), 1, received)
+        self.assertEqual(fwd.position.cursor, "s=9")
+
+    def test_stop_waits_for_acknowledgements(self):
+        """On stop, entries acknowledged shortly after still move the position."""
+        fwd, link = self.forwarder, self.link
+        fwd.deliver(self.entries[0])
+        self.assertIsNone(fwd.position.cursor)
+        timer = threading.Timer(0.3, link.acknowledge)
+        timer.start()
+        self.addCleanup(timer.cancel)
+        fwd.drain(timeout=2)
+        self.assertEqual(fwd.position.cursor, "s=0")
+
+    def test_resent_in_journal_order(self):
+        """After a dead peer, waiting entries are sent again in their order."""
+        fwd, link = self.forwarder, self.link
+        for entry in self.entries[:5]:
+            fwd.deliver(entry)
+        link.vanish(failing_connects=1)
+        for entry in self.entries[5:]:
+            fwd.deliver(entry)
+        link.acknowledge()
+        self.assertEqual(self.received(), [f"entry {i}" for i in range(10)])
 
 
 if __name__ == "__main__":

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.0-hl.3
+
+- No loss when the server vanishes without closing the connection: over
+  TCP on Linux, an entry only counts as delivered once the server has
+  acknowledged its bytes (`SIOCOUTQ`); after a failure, the entries it had
+  not acknowledged are sent again first, in their order. Measured before:
+  31 s of entries lost when the server vanished; now duplicates instead
+- The saved position only covers acknowledged entries; on stop, the app
+  waits up to 2 s for the last acknowledgements
+- A connection closed by the server is reported and reopened like any
+  other failure, so that its unacknowledged entries are sent again
+- The app's own lines start with the time (`[18:38:57] WARNING: ...`)
+- UDP, TLS and systems without `SIOCOUTQ` keep the previous behaviour
+
 ## 0.6.0-hl.2
 
 - Severity read from two more formats seen on a real HAOS host:

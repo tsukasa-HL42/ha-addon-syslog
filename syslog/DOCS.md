@@ -59,14 +59,20 @@ backlog_max_hours: 6
 
 - First start (no saved position): the app starts at the end of the journal
   and sends nothing older.
-- The position is saved every 5 seconds and when the app stops. After a crash
-  or a power loss, the entries of the last seconds may be **sent twice**;
-  none is lost.
+- Over TCP on Linux, an entry only counts as delivered once the server has
+  acknowledged its bytes. The position covers acknowledged entries only; it
+  is saved every 5 seconds and when the app stops, after waiting up to
+  2 seconds for the last acknowledgements. After a crash or a power loss,
+  the entries of the last seconds may be **sent twice**; none is lost.
 - A position older than `backlog_max_hours` resumes at that limit; the app
   log says which entries were skipped.
 - A TCP connection whose server vanished without closing it is detected
-  within about 30 seconds (keepalive and `TCP_USER_TIMEOUT`); entries handed
-  to such a connection during that window may be lost.
+  within about 30 seconds (keepalive and `TCP_USER_TIMEOUT`). The entries
+  it had not acknowledged are sent again on the next connection, so the
+  server may receive some of them twice.
+- With UDP or TLS, acknowledgements cannot be measured: an entry counts as
+  delivered once handed to the system, and over TLS the entries of the
+  last 30 seconds before a vanished server may be lost.
 
 ### Redacting secrets
 
@@ -90,7 +96,8 @@ error, so no unmasked messages are sent.
 ### App log
 
 The app writes one line when the server becomes unreachable and one when it
-is reachable again, never one per message. These lines also reach the syslog
+is reachable again, never one per message, each starting with the time
+(`[18:38:57] WARNING: cannot send to ...`). These lines also reach the syslog
 server, under the app's container name.
 
 ## Origin

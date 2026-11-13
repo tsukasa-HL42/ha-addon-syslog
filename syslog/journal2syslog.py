@@ -3,7 +3,10 @@ Forward the HAOS systemd journal to a remote syslog server.
 
 The journal itself is the buffer: the reader only moves past an entry once it
 has been handed to the server, and its position is saved in /data so that a
-restart resumes where it stopped instead of at the end of the journal.
+restart resumes where it stopped instead of at the end of the journal. Over
+TCP on Linux, an entry only counts as delivered once the server has
+acknowledged its bytes; what a vanished server never acknowledged is sent
+again on the next connection.
 
 Configuration comes from environment variables set by run.sh.
 """
@@ -17,12 +20,23 @@ import select
 import signal
 import socket
 import ssl
+import struct
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from systemd import journal
+
+try:  # Linux: bytes sent on a TCP socket and not yet acknowledged (SIOCOUTQ)
+    import fcntl
+    import termios
+
+    SIOCOUTQ = termios.TIOCOUTQ
+except (ImportError, AttributeError):
+    fcntl = None
+    SIOCOUTQ = None
 
 FACILITY_USER = 1
 NILVALUE = "-"
@@ -162,7 +176,7 @@ def load_config(env=os.environ) -> Config:
 
 def log(level: str, message: str) -> None:
     """Own messages, on stdout: they reach the journal and the server too."""
-    print(f"{level}: {message}", flush=True)
+    print(f"[{datetime.now():%H:%M:%S}] {level}: {message}", flush=True)
 
 
 # -- journal fields -----------------------------------------------------------
@@ -309,17 +323,31 @@ def configure_stream_socket(sock: socket.socket) -> None:
 
 
 class Transport:
-    """One connection to the server; send() raises OSError on failure."""
+    """
+    One connection to the server; send() raises OSError on failure and leaves
+    closing to the caller, who may still read unacked() first.
+    """
 
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.sock = None
+        # counts connections, so that offsets of an old one are never mixed up
+        self.generation = 0
+        # bytes written on the current connection, framing included
+        self.sent_bytes = 0
+        # acknowledgements are measured on plain TCP only: with TLS the kernel
+        # counts encrypted records, not the bytes written here
+        self.track_acks = cfg.stream and not cfg.use_ssl and SIOCOUTQ is not None
         self.ssl_context = None
         if cfg.use_ssl:
             self.ssl_context = ssl.create_default_context()
             if not cfg.ssl_verify:
                 self.ssl_context.check_hostname = False
                 self.ssl_context.verify_mode = ssl.CERT_NONE
+
+    @property
+    def connected(self) -> bool:
+        return self.sock is not None
 
     def close(self) -> None:
         if self.sock is not None:
@@ -346,6 +374,8 @@ class Transport:
                         sock, server_hostname=self.cfg.host
                     )
                 self.sock = sock
+                self.generation += 1
+                self.sent_bytes = 0
                 return
             except OSError as err:  # ssl.SSLError is an OSError
                 sock.close()
@@ -368,23 +398,42 @@ class Transport:
 
     def send(self, payload: bytes) -> None:
         if self.sock is not None and self.cfg.stream and self.peer_closed():
-            self.close()
+            # not reopened here: what the old connection did not get
+            # acknowledged must be sent again first, which the caller does
+            raise ConnectionResetError("connection closed by the server")
         if self.sock is None:
             self.connect()
+        if self.cfg.stream:
+            # octet counting (RFC 6587), for both formats
+            frame = b"%d %b" % (len(payload), payload)
+            self.sock.sendall(frame)
+        else:
+            frame = payload
+            self.sock.send(frame)
+        self.sent_bytes += len(frame)
+
+    def unacked(self):
+        """
+        Bytes written on this connection that the server has not acknowledged
+        yet, or None when this cannot be measured (UDP, TLS, outside Linux).
+        """
+        if not self.track_acks:
+            return None
+        if self.sock is None:
+            return self.sent_bytes
         try:
-            if self.cfg.stream:
-                # octet counting (RFC 6587), for both formats
-                self.sock.sendall(b"%d %b" % (len(payload), payload))
-            else:
-                self.sock.send(payload)
-        except OSError:
-            self.close()
-            raise
+            raw = fcntl.ioctl(self.sock.fileno(), SIOCOUTQ, b"\0\0\0\0")
+            return struct.unpack("i", raw)[0]
+        except (OSError, ValueError):
+            return self.sent_bytes  # unknown: count nothing more as acknowledged
 
 
 # -- saved position -----------------------------------------------------------
 class Position:
-    """Cursor of the last entry handed to the server, saved in STATE_DIR."""
+    """
+    Cursor of the last entry delivered (acknowledged by the server when that
+    can be measured, handed to it otherwise), saved in STATE_DIR.
+    """
 
     def __init__(self, cfg: Config) -> None:
         self.path = os.path.join(cfg.state_dir, STATE_FILE)
@@ -484,13 +533,16 @@ def open_journal(cfg: Config, position: Position):
 
 # -- main loop ----------------------------------------------------------------
 class Forwarder:
-    def __init__(self, cfg: Config) -> None:
+    def __init__(self, cfg: Config, transport=None) -> None:
         self.cfg = cfg
         self.formatter = Formatter(cfg)
-        self.transport = Transport(cfg)
+        self.transport = transport or Transport(cfg)
         self.position = Position(cfg)
         self.stopping = False
         self.down_since = None
+        # entries sent but not yet acknowledged, oldest first:
+        # (connection generation, end offset in its bytes, entry, payload)
+        self.inflight = deque()
 
     def stop(self, *_args) -> None:
         self.stopping = True
@@ -500,14 +552,42 @@ class Forwarder:
         while not self.stopping and time.monotonic() < deadline:
             time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
 
+    def refresh_acks(self) -> None:
+        """Move the position over the entries the server has acknowledged."""
+        if not self.inflight:
+            return
+        unacked = self.transport.unacked()
+        if unacked is None:  # not measurable: handed over counts as delivered
+            while self.inflight:
+                self.position.advance(self.inflight.popleft()[2])
+            return
+        acknowledged = self.transport.sent_bytes - unacked
+        while self.inflight:
+            generation, end, entry, _payload = self.inflight[0]
+            if generation != self.transport.generation or end > acknowledged:
+                break
+            self.inflight.popleft()
+            self.position.advance(entry)
+
     def deliver(self, entry: dict) -> bool:
-        """Send one entry, retrying until it is sent; False if stopping."""
-        payload = self.formatter.payload(entry)
+        """
+        Send one entry, retrying until it is sent; False if stopping. After a
+        failure, the entries the server had not acknowledged are sent again
+        first, in their order: a vanished server costs duplicates, not losses.
+        """
+        queue = deque([(entry, self.formatter.payload(entry))])
         delay = 1.0
-        while True:
+        while queue:
+            current, payload = queue[0]
             try:
                 self.transport.send(payload)
             except OSError as err:
+                self.refresh_acks()  # what the server did take is not resent
+                self.transport.close()
+                queue.extendleft(
+                    reversed([(e, p) for _gen, _end, e, p in self.inflight])
+                )
+                self.inflight.clear()
                 if self.down_since is None:
                     self.down_since = time.monotonic()
                     log(
@@ -526,8 +606,20 @@ class Forwarder:
                     f"sending again after {time.monotonic() - self.down_since:.0f} s",
                 )
                 self.down_since = None
-            self.position.advance(entry)
-            return True
+            queue.popleft()
+            self.inflight.append(
+                (self.transport.generation, self.transport.sent_bytes, current, payload)
+            )
+            self.refresh_acks()
+        return True
+
+    def drain(self, timeout: float = 2.0) -> None:
+        """On stop, give the server a moment to acknowledge what was sent."""
+        deadline = time.monotonic() + timeout
+        self.refresh_acks()
+        while self.inflight and self.transport.connected and time.monotonic() < deadline:
+            time.sleep(0.05)
+            self.refresh_acks()
 
     def run(self) -> None:
         jr, pending = open_journal(self.cfg, self.position)
@@ -547,9 +639,11 @@ class Forwarder:
                     self.position.flush()
                     if self.stopping:
                         return
+                self.refresh_acks()
                 self.position.flush()
                 jr.wait(1)  # short wait: a stop request is seen quickly
         finally:
+            self.drain()
             self.position.flush(force=True)
             self.transport.close()
 
