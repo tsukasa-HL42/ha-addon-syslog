@@ -11,14 +11,13 @@ RUN apt-get update \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
-COPY bashio_info.sh /
 COPY journal2syslog.py /
 COPY run.sh /
 
 # Files copied from Windows to the addons share may lose the execute bit or
 # gain CRLF line endings; either would stop the app from starting.
-RUN sed -i 's/\r$//' /run.sh /bashio_info.sh \
-    && chmod a+x /run.sh /bashio_info.sh
+RUN sed -i 's/\r$//' /run.sh \
+    && chmod a+x /run.sh
 
 LABEL \
     org.opencontainers.image.title="Syslog (HL42)" \

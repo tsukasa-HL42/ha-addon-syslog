@@ -33,6 +33,9 @@ translations are modified.
   (python-systemd 235 in both, Python 3.13); the build restores the execute bit and LF
   line endings of the scripts, which a copy from Windows may lose
 - Offline test bench in `tests/`
+- Removed what the fork does not use: publishing workflows, Dependabot,
+  release drafter, development container, funding link and the
+  `bashio_info.sh` debug helper
 
 ## 0.6.0
 

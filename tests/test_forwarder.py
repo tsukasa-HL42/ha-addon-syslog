@@ -530,6 +530,9 @@ class SocketOptionTests(unittest.TestCase):
         saved = {k: os.environ.get(k) for k in env}
         os.environ.update(env)
         sys.path.insert(0, FAKE)
+        # no __pycache__ next to the script: the syslog folder is copied to HAOS
+        self.addCleanup(setattr, sys, "dont_write_bytecode", sys.dont_write_bytecode)
+        sys.dont_write_bytecode = True
         try:
             spec = importlib.util.spec_from_file_location("j2s_under_test", SCRIPT)
             module = importlib.util.module_from_spec(spec)
