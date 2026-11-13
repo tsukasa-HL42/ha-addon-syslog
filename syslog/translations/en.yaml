@@ -17,3 +17,9 @@ configuration:
   syslog_format:
     name: Syslog format
     description: The syslog message format, either rfc3164 (BSD syslog) or rfc5424 (ISO 8601 timestamps, structured data header).
+  redact_patterns:
+    name: Redact patterns
+    description: Regular expressions (Python syntax) whose matches are replaced by *** before a message is sent, e.g. to keep tokens or secret URLs out of the remote syslog.
+  backlog_max_hours:
+    name: Maximum backlog (hours)
+    description: After a stop, entries written since the last one sent are sent on restart, up to this many hours back. 0 starts at the end of the journal.

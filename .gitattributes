@@ -1,0 +1,4 @@
+# The syslog folder is copied as is to HAOS: shell scripts and the
+# Dockerfile must keep LF line endings, whatever core.autocrlf says.
+* text=auto eol=lf
+*.png binary

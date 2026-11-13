@@ -1,12 +1,12 @@
-name: "Syslog"
-version: "0.6.0"
+name: "Syslog (HL42)"
+version: "0.6.0-hl.1"
 slug: "syslog"
-description: "Send your HAOS logs to a remote syslog server"
-url: "https://github.com/mib1185/ha-addon-syslog"
+description: "Send your HAOS logs to a remote syslog server, without losing them on restarts and outages"
+url: "https://github.com/tsukasa-HL42/ha-addon-syslog"
 arch:
   - aarch64
   - amd64
-image: ghcr.io/mib1185/ha-addon-syslog
+# No "image": the Supervisor builds the app locally from the Dockerfile.
 init: false
 startup: services
 journald: true
@@ -17,6 +17,8 @@ options:
   syslog_ssl: false
   syslog_ssl_verify: true
   syslog_format: rfc3164
+  redact_patterns: []
+  backlog_max_hours: 6
 schema:
   syslog_host: str
   syslog_port: int
@@ -24,3 +26,6 @@ schema:
   syslog_ssl: bool
   syslog_ssl_verify: bool
   syslog_format: list(rfc3164|rfc5424)
+  redact_patterns:
+    - str
+  backlog_max_hours: int(0,168)

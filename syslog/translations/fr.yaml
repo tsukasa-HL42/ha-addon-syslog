@@ -1,0 +1,25 @@
+configuration:
+  syslog_host:
+    name: Serveur syslog
+    description: Nom ou adresse IP du serveur syslog distant qui reçoit les journaux de HAOS.
+  syslog_port:
+    name: Port syslog
+    description: Port du serveur syslog distant.
+  syslog_protocol:
+    name: Protocole de transport
+    description: Protocole utilisé pour envoyer les journaux de HAOS (udp ou tcp).
+  syslog_ssl:
+    name: Chiffrement SSL
+    description: Chiffre la connexion (tcp seulement).
+  syslog_ssl_verify:
+    name: Vérifier le certificat
+    description: Vérifie le certificat du serveur quand le chiffrement est actif.
+  syslog_format:
+    name: Format syslog
+    description: Format des messages, rfc3164 (syslog BSD) ou rfc5424 (horodatage ISO 8601 avec fuseau, recommandé).
+  redact_patterns:
+    name: Motifs à masquer
+    description: Expressions régulières (syntaxe Python) dont les correspondances sont remplacées par *** avant l'envoi, par exemple pour qu'un jeton ou une URL secrète ne quitte pas l'hôte. Un motif invalide arrête l'application.
+  backlog_max_hours:
+    name: Rattrapage maximal (heures)
+    description: Après un arrêt, les entrées écrites depuis la dernière envoyée sont envoyées au redémarrage, sur ce nombre d'heures au plus. 0 repart de la fin du journal.
