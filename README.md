@@ -42,7 +42,7 @@ outre :
 
 - l'heure de l'événement, et non celle de l'envoi ;
 - la gravité lue dans les lignes des modules (bashio, s6-overlay, Python,
-  logfmt) et le niveau `notice` conservé ;
+  logfmt, Zigbee2MQTT, Mosquitto, OpenThread) et le niveau `notice` conservé ;
 - le masquage des secrets avant qu'ils quittent l'hôte ;
 - une ligne dans le journal du module quand le serveur devient injoignable,
   une quand il revient ;

@@ -86,7 +86,15 @@ GENERIC_LEVEL_PATTERNS = (
     re.compile(r"^\[[^\]]{8,40}\] (?P<level>[A-Za-z]+):"),
     # level first, upper case only: "WARNING: ..."
     re.compile(r"^(?P<level>DEBUG|INFO|NOTICE|WARNING|WARN|ERROR|CRITICAL|FATAL)\b"),
+    # level first, lower case, then a colon (Mosquitto plugins): "error: ..."
+    re.compile(r"^(?P<level>debug|info|notice|warning|warn|error|critical|fatal): "),
+    # OpenThread Border Router: uptime, then a one-letter level
+    # "6d.00:27:52.159 [D] P-SpinelDrive-: ..." (letters in OPENTHREAD_LEVELS)
+    re.compile(r"^(?:\d+d\.)?\d{2}:\d{2}:\d{2}\.\d{3} \[(?P<letter>[CWNID])\] "),
 )
+# OpenThread levels: crit, warn, note, info, debug. Kept apart from
+# LEVEL_TO_SEVERITY so that a lone letter is never read as a level elsewhere.
+OPENTHREAD_LEVELS = {"C": 2, "W": 4, "N": 5, "I": 6, "D": 7}
 
 # Colour codes, including combined ones such as bold red "\x1b[1;31m".
 ANSI_COLOR_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
@@ -194,10 +202,14 @@ def entry_time(entry: dict) -> datetime:
 def level_from(message: str, patterns) -> int | None:
     for pattern in patterns:
         match = pattern.search(message)
-        if match:
-            severity = LEVEL_TO_SEVERITY.get(match.group("level").upper())
-            if severity is not None:
-                return severity
+        if not match:
+            continue
+        groups = match.groupdict()
+        if groups.get("letter"):
+            return OPENTHREAD_LEVELS[groups["letter"]]
+        severity = LEVEL_TO_SEVERITY.get(groups["level"].upper())
+        if severity is not None:
+            return severity
     return None
 
 

@@ -41,13 +41,14 @@ backlog_max_hours: 6
 
 - **Hostname**: the HAOS hostname (*Settings → System → Network*).
 - **App name**: the container name for containers (`homeassistant`,
-  `hassio_supervisor`, `addon_…`), the syslog identifier for host programs.
+  `hassio_supervisor`, `app_…`), the syslog identifier for host programs.
 - **Process id**: the PID for host programs, `-` for containers (the journal
   only knows the PID of the Docker daemon).
 - **Severity**: the journal priority for host programs; for Home Assistant
   Core and the Supervisor, the level written in the line (traceback lines
   keep the level of the line before); for other containers, the level found
-  in the usual formats (bashio, s6-overlay, Python logging, logfmt), info
+  in the usual formats (bashio, s6-overlay, Python logging, logfmt,
+  Zigbee2MQTT, Mosquitto, OpenThread Border Router), info
   otherwise. Facility is always `user`.
 - **Timestamp**: the time of the journal entry, not the time of sending, so
   entries sent late keep their real time.

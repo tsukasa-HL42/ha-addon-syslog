@@ -371,10 +371,19 @@ class FormatTests(Bench):
             "[2026-11-13 10:00:00] warn: \tz2m: retry": 4,
             "2026-11-13 10:00:00,123 - app - CRITICAL - dead": 2,
             "WARNING: plain prefix": 4,
+            # OpenThread Border Router: uptime, then one-letter level
+            "6d.00:27:52.159 [D] P-SpinelDrive-: Received spinel frame": 7,
+            "6d.00:27:52.160 [N] Mle-----------: Role detached -> leader": 5,
+            "6d.00:27:52.161 [W] Platform------: radio timeout": 4,
+            "6d.00:27:52.162 [C] Platform------: init failed": 2,
+            # Mosquitto plugins: lower-case level and a colon first
+            "error: received null username or password for unpwd check": 3,
+            "warning: retained message dropped": 4,
             "Info about nothing": 6,
+            "information: not a level": 6,
         }
         for i, body in enumerate(cases):
-            self.append(body, CONTAINER_NAME=f"addon_core_a{i}", PRIORITY=3)
+            self.append(body, CONTAINER_NAME=f"app_core_a{i}", PRIORITY=3)
         for body, severity in cases.items():
             with self.subTest(body=body):
                 self.assertEqual(self.message(body)["severity"], severity)

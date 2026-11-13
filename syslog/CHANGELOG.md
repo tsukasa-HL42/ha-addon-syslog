@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0-hl.2
+
+- Severity read from two more formats seen on a real HAOS host:
+  OpenThread Border Router (`6d.00:27:52.159 [D] ...`, letters C, W, N, I, D)
+  and Mosquitto plugins (`error: ...`, lower-case level and a colon first)
+- Documentation: app containers are named `app_...` since the add-on to
+  app rename
+
 ## 0.6.0-hl.1
 
 Fork of mib1185/ha-addon-syslog 0.6.0. `journal2syslog.py` is rewritten
