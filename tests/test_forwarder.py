@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -114,6 +115,20 @@ class Receiver:
             conn.close()
         self._conns.clear()
 
+    def reset(self) -> None:
+        """Abort every connection with a reset: the peer gets an error."""
+        linger = struct.pack("HH" if os.name == "nt" else "ii", 1, 0)
+        for conn in self._conns:
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
+            # Linux sends the reset only once the reading thread lets go of
+            # the socket: wake it up first, without sending an end of stream
+            try:
+                conn.shutdown(socket.SHUT_RD)
+            except OSError:
+                pass
+            conn.close()
+        self._conns.clear()
+
     def received(self) -> list[str]:
         with self.lock:
             return list(self.messages)
@@ -195,6 +210,7 @@ class Bench(unittest.TestCase):
             "_PID": 4242,
         }
         entry.update(fields)
+        entry = {key: value for key, value in entry.items() if value is not None}
         with open(self.journal, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry) + "\n")
         return entry
@@ -312,6 +328,17 @@ class FormatTests(Bench):
         self.append("old event", when=when)
         sent = datetime.fromisoformat(self.message("old event")["ts"].replace("Z", "+00:00"))
         self.assertLess(abs((sent - when).total_seconds()), 0.001)
+
+    def test_program_from_process_name(self):
+        """A daemon without syslog identifier (udisksd on HAOS) gets its process name."""
+        self.start_synced()
+        self.append(
+            "udisks daemon version 2.10.1 starting",
+            SYSLOG_IDENTIFIER=None, _COMM="udisksd", _PID=812,
+        )
+        fields = self.message("udisks daemon version 2.10.1 starting")
+        self.assertEqual(fields["app"], "udisksd")
+        self.assertEqual(fields["procid"], "812")
 
     def test_non_ascii_message_has_bom(self):
         """RFC 5424: a UTF-8 message starts with a BOM, an ASCII one does not."""
@@ -437,6 +464,53 @@ class RedactTests(Bench):
             code = proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             self.fail("forwarder kept running with an invalid redact pattern")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.receiver.received(), [])
+
+
+# The pattern given in DOCS.md for the hourly sweep seen on HAOS (13/11/2026):
+# reverse lookups sent without recursion, refused by the upstream resolver.
+SWEEP_PATTERN = (
+    r'^hassio_dns: \[INFO\] \S+ - \d+ "PTR IN [0-9.]+in-addr\.arpa\. '
+    r'udp \d+ false \d+" REFUSED qr,ra '
+)
+SWEEP_LINE = ('[INFO] 172.30.32.1:41258 - 30575 "PTR IN 254.0.42.10.in-addr.arpa. '
+              'udp 42 false 512" REFUSED qr,ra 42 0.000428374s')
+
+
+class ExcludeTests(Bench):
+    def test_sweep_excluded_and_nothing_else(self):
+        """Only the lines matching an exclude pattern are left out."""
+        self.extra_env["EXCLUDE_PATTERNS"] = SWEEP_PATTERN
+        self.start_synced()
+        kept = {
+            # the same lookup failing for another reason
+            '[INFO] 172.30.32.1:58204 - 34477 "PTR IN 1.0.42.10.in-addr.arpa. '
+            'udp 40 false 512" SERVFAIL qr 40 4.00107475s': "hassio_dns",
+            # refused, but asked with recursion: a real problem
+            '[INFO] 172.30.32.1:1 - 2 "PTR IN 9.0.42.10.in-addr.arpa. '
+            'udp 40 false 512" REFUSED qr,rd,ra 40 0.0004s': "hassio_dns",
+            # refused, another type of query
+            '[INFO] 127.0.0.1:57739 - 19900 "NS IN . udp 17 false 512" '
+            'REFUSED qr,aa,rd 17 0.000061706s': "hassio_dns",
+            # the very same text from another program
+            SWEEP_LINE.replace("30575", "30576"): "app_core_other",
+        }
+        self.append(SWEEP_LINE, CONTAINER_NAME="hassio_dns")
+        for body, container in kept.items():
+            self.append(body, CONTAINER_NAME=container)
+        self.append("after the excluded ones")
+        self.wait_for_bodies(*kept, "after the excluded ones")
+        self.assertNotIn(SWEEP_LINE, self.receiver.bodies())
+
+    def test_invalid_exclude_pattern_stops_before_sending(self):
+        self.extra_env["EXCLUDE_PATTERNS"] = "("
+        self.append("before start")
+        proc = self.start()
+        try:
+            code = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.fail("forwarder kept running with an invalid exclude pattern")
         self.assertNotEqual(code, 0)
         self.assertEqual(self.receiver.received(), [])
 
@@ -629,6 +703,47 @@ class SocketOptionTests(unittest.TestCase):
         else:
             self.assertIsNone(transport.unacked(), "no SIOCOUTQ outside Linux")
 
+    def _connected_transport(self, module, receiver):
+        cfg = module.Config(
+            host="127.0.0.1", port=receiver.port, proto="tcp", use_ssl=False,
+            ssl_verify=False, fmt="rfc5424", hostname=HOST,
+        )
+        transport = module.Transport(cfg)
+        self.addCleanup(transport.close)
+        transport.send(b"first")
+        deadline = time.monotonic() + 5
+        while not receiver.received() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return transport
+
+    def test_failure_reason_closed_by_server(self):
+        """The server ends the connection (a restart): said as such."""
+        module = load_script(self)
+        receiver = Receiver()
+        self.addCleanup(receiver.stop)
+        transport = self._connected_transport(module, receiver)
+        receiver.stop()
+        time.sleep(0.3)
+        with self.assertRaises(OSError) as caught:
+            transport.send(b"second")
+        self.assertEqual(str(caught.exception), "connection closed by the server")
+
+    def test_failure_reason_from_the_system(self):
+        """
+        A connection the system gave up (reset, or unacknowledged data timed
+        out) is reported with the system's own error, not as a close.
+        """
+        module = load_script(self)
+        receiver = Receiver()
+        self.addCleanup(receiver.stop)
+        transport = self._connected_transport(module, receiver)
+        receiver.reset()
+        time.sleep(0.3)
+        with self.assertRaises(OSError) as caught:
+            transport.send(b"second")
+        self.assertNotEqual(str(caught.exception), "connection closed by the server")
+        self.assertIsNotNone(caught.exception.errno, "not the system's error")
+
 
 class FakeLink:
     """
@@ -732,6 +847,37 @@ class AcknowledgementTests(unittest.TestCase):
         self.assertEqual(received.count("entry 4"), 1, received)
         self.assertEqual(fwd.position.cursor, "s=9")
 
+    def test_resent_entries_counted(self):
+        """The return of the server says how many entries were sent again."""
+        fwd, link = self.forwarder, self.link
+        messages = []
+        self.module.log = lambda level, message: messages.append(message)
+        for entry in self.entries[:4]:
+            fwd.deliver(entry)
+        link.acknowledge()
+        fwd.refresh_acks()
+        for entry in self.entries[4:8]:  # never acknowledged
+            fwd.deliver(entry)
+        link.vanish(failing_connects=1)
+        fwd.deliver(self.entries[8])
+        again = [m for m in messages if m.startswith("sending again")]
+        self.assertEqual(len(again), 1, messages)
+        self.assertIn("4 entries not acknowledged, sent again", again[0])
+
+    def test_nothing_resent_nothing_said(self):
+        """An outage with nothing in flight keeps the short message."""
+        fwd, link = self.forwarder, self.link
+        messages = []
+        self.module.log = lambda level, message: messages.append(message)
+        fwd.deliver(self.entries[0])
+        link.acknowledge()
+        fwd.refresh_acks()
+        link.vanish(failing_connects=1)
+        fwd.deliver(self.entries[1])
+        again = [m for m in messages if m.startswith("sending again")]
+        self.assertEqual(len(again), 1, messages)
+        self.assertNotIn("sent again", again[0].replace("sending again", ""))
+
     def test_stop_waits_for_acknowledgements(self):
         """On stop, entries acknowledged shortly after still move the position."""
         fwd, link = self.forwarder, self.link
@@ -742,6 +888,64 @@ class AcknowledgementTests(unittest.TestCase):
         self.addCleanup(timer.cancel)
         fwd.drain(timeout=2)
         self.assertEqual(fwd.position.cursor, "s=0")
+
+    def _excluding(self, report_seconds=3600):
+        """Forwarder whose formatter leaves out messages starting with 'drop'."""
+        self.cfg.exclude = [re.compile(r"^test: drop")]
+        self.cfg.exclude_report_seconds = report_seconds
+        return self.module.Forwarder(self.cfg, transport=self.link)
+
+    def _entry(self, i, message):
+        entry = dict(self.entries[i])
+        entry["MESSAGE"] = message
+        return entry
+
+    def test_excluded_entry_waits_for_earlier_acknowledgements(self):
+        """An excluded entry never moves the position past unacknowledged ones."""
+        fwd, link = self._excluding(), self.link
+        fwd.deliver(self.entries[0])                # sent, not acknowledged
+        fwd.deliver(self._entry(1, "drop me"))      # left out
+        fwd.refresh_acks()
+        self.assertIsNone(fwd.position.cursor)
+        link.acknowledge()
+        fwd.refresh_acks()
+        self.assertEqual(fwd.position.cursor, "s=1")
+        self.assertEqual(self.received(), ["entry 0"])
+
+    def test_excluded_entry_alone_moves_the_position(self):
+        """With nothing in flight, an excluded entry is done at once."""
+        fwd = self._excluding()
+        fwd.deliver(self._entry(0, "drop me"))
+        self.assertEqual(fwd.position.cursor, "s=0")
+        self.assertEqual(self.link.sent_bytes, 0, "an excluded entry was sent")
+
+    def test_excluded_entries_not_sent_after_outage(self):
+        """After an outage, excluded entries are not sent and the position goes on."""
+        fwd, link = self._excluding(), self.link
+        fwd.deliver(self.entries[0])                # not acknowledged
+        fwd.deliver(self._entry(1, "drop me"))
+        link.vanish(failing_connects=1)
+        fwd.deliver(self.entries[2])                # outage, then reconnection
+        link.acknowledge()
+        fwd.refresh_acks()
+        self.assertEqual(self.received(), ["entry 0", "entry 2"])
+        self.assertEqual(fwd.position.cursor, "s=2")
+        self.assertFalse(fwd.inflight)
+
+    def test_excluded_entries_reported(self):
+        """The app says how many entries it left out, at most once per period."""
+        messages = []
+        self.module.log = lambda level, message: messages.append(message)
+        fwd = self._excluding(report_seconds=0)
+        fwd.deliver(self._entry(0, "drop me"))
+        fwd.deliver(self._entry(1, "drop me too"))
+        reports = [m for m in messages if m.startswith("excluded")]
+        self.assertTrue(reports, messages)
+        self.assertRegex(reports[-1], r"^excluded 1 entr(y|ies) ")
+        fwd = self._excluding(report_seconds=3600)
+        messages.clear()
+        fwd.deliver(self._entry(2, "drop me"))
+        self.assertEqual([m for m in messages if m.startswith("excluded")], [])
 
     def test_resent_in_journal_order(self):
         """After a dead peer, waiting entries are sent again in their order."""

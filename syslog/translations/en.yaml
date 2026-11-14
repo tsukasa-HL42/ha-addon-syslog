@@ -20,6 +20,9 @@ configuration:
   redact_patterns:
     name: Redact patterns
     description: Regular expressions (Python syntax) whose matches are replaced by *** before a message is sent, e.g. to keep tokens or secret URLs out of the remote syslog.
+  exclude_patterns:
+    name: Exclude patterns
+    description: "Regular expressions (Python syntax) matched against `app name: message`; a matching entry is not sent. The app says once per hour how many it left out. An invalid pattern stops the app."
   backlog_max_hours:
     name: Maximum backlog (hours)
     description: After a stop, entries written since the last one sent are sent on restart, up to this many hours back. 0 starts at the end of the journal.

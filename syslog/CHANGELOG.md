@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.1.0
+
+- The reason given in `cannot send` is the real one: "connection closed by
+  the server" only when the server ended the connection; otherwise the
+  error the system recorded, such as a reset or `Connection timed out` when
+  the server stopped acknowledging data. Seen on HAOS: a server that had
+  vanished was reported as having closed the connection
+- `sending again` says how many entries the server had not acknowledged and
+  were sent again: `sending again after 15 s (4 entries not acknowledged,
+  sent again)`
+- A line without syslog identifier gets the name of its process as app name
+  (`udisksd` on HAOS), instead of no name at all
+- New option `exclude_patterns`: regular expressions matched against
+  `app name: message`; a matching entry is not sent, the journal position
+  still moves past it in order, and the app says once an hour how many it
+  left out. Example in the documentation: the hourly reverse lookup sweep
+  refused by the resolver on HAOS
+
 ## 1.0.0
 
 First stable release of the HL42 fork, the code of 0.6.0-hl.3 unchanged.

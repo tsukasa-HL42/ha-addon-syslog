@@ -17,6 +17,9 @@ export SYSLOG_FORMAT
 # one pattern per line
 REDACT_PATTERNS=$(bashio::config 'redact_patterns')
 export REDACT_PATTERNS
+# one pattern per line, matched against "app: message"
+EXCLUDE_PATTERNS=$(bashio::config 'exclude_patterns')
+export EXCLUDE_PATTERNS
 BACKLOG_MAX_HOURS=$(bashio::config 'backlog_max_hours' 6)
 export BACKLOG_MAX_HOURS
 # persistent app storage: the journal position survives restarts

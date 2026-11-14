@@ -1,5 +1,5 @@
 name: "Syslog (HL42)"
-version: "1.0.0"
+version: "1.1.0"
 slug: "syslog"
 description: "Send your HAOS logs to a remote syslog server, without losing them on restarts and outages"
 url: "https://github.com/tsukasa-HL42/ha-addon-syslog"
@@ -18,6 +18,7 @@ options:
   syslog_ssl_verify: true
   syslog_format: rfc3164
   redact_patterns: []
+  exclude_patterns: []
   backlog_max_hours: 6
 schema:
   syslog_host: str
@@ -27,5 +28,7 @@ schema:
   syslog_ssl_verify: bool
   syslog_format: list(rfc3164|rfc5424)
   redact_patterns:
+    - str
+  exclude_patterns:
     - str
   backlog_max_hours: int(0,168)

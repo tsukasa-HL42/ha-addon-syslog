@@ -126,6 +126,8 @@ class Config:
     fmt: str
     hostname: str
     redact: list = field(default_factory=list)
+    exclude: list = field(default_factory=list)
+    exclude_report_seconds: float = 3600
     backlog_max_hours: float = 6
     state_dir: str = "/data"
     state_flush_seconds: float = 5
@@ -135,6 +137,18 @@ class Config:
     @property
     def stream(self) -> bool:
         return self.proto == "tcp"
+
+
+def compile_patterns(text: str, kind: str) -> list:
+    """One regular expression per line; raise ValueError on an invalid one."""
+    patterns = []
+    for pattern in text.splitlines():
+        if pattern:
+            try:
+                patterns.append(re.compile(pattern))
+            except re.error as err:
+                raise ValueError(f"invalid {kind} pattern {pattern!r}: {err}") from err
+    return patterns
 
 
 def load_config(env=os.environ) -> Config:
@@ -148,15 +162,11 @@ def load_config(env=os.environ) -> Config:
     use_ssl = env.get("SYSLOG_SSL", "false") == "true"
     if use_ssl and proto != "tcp":
         raise ValueError("TLS is only supported with tcp")
-    redact = []
     # one regular expression per line; an invalid one stops the app instead
-    # of sending unmasked messages (from Milas22)
-    for pattern in env.get("REDACT_PATTERNS", "").splitlines():
-        if pattern:
-            try:
-                redact.append(re.compile(pattern))
-            except re.error as err:
-                raise ValueError(f"invalid redact pattern {pattern!r}: {err}") from err
+    # of sending unmasked messages (from Milas22), or entries meant to be
+    # left out
+    redact = compile_patterns(env.get("REDACT_PATTERNS", ""), "redact")
+    exclude = compile_patterns(env.get("EXCLUDE_PATTERNS", ""), "exclude")
     return Config(
         host=env["SYSLOG_HOST"],
         port=int(env["SYSLOG_PORT"]),
@@ -166,6 +176,8 @@ def load_config(env=os.environ) -> Config:
         fmt=fmt,
         hostname=env.get("HAOS_HOSTNAME") or socket.gethostname(),
         redact=redact,
+        exclude=exclude,
+        exclude_report_seconds=float(env.get("EXCLUDE_REPORT_SECONDS", "3600")),
         backlog_max_hours=float(env.get("BACKLOG_MAX_HOURS", "6")),
         state_dir=env.get("STATE_DIR", "/data"),
         state_flush_seconds=float(env.get("STATE_FLUSH_SECONDS", "5")),
@@ -286,7 +298,8 @@ class Formatter:
             message = pattern.sub(REDACT_REPLACEMENT, message)
         return message
 
-    def payload(self, entry: dict) -> bytes:
+    def payload(self, entry: dict):
+        """The bytes to send, or None for an entry left out by exclude_patterns."""
         message = normalize_field(entry.get("MESSAGE"))
         container = normalize_field(entry.get("CONTAINER_NAME"))
         if container:
@@ -294,10 +307,23 @@ class Formatter:
             app = container
             procid = None  # the journal only knows dockerd's PID
         else:
-            app = normalize_field(entry.get("SYSLOG_IDENTIFIER")) or None
+            # a daemon logging through the journal API may set no identifier
+            # (udisksd on HAOS): its process name, recorded by the journal
+            app = (
+                normalize_field(entry.get("SYSLOG_IDENTIFIER"))
+                or normalize_field(entry.get("_COMM"))
+                or None
+            )
             procid = entry.get("_PID")
-        message = self.redact(message)
+        # level first: a left-out line still sets the level its traceback
+        # lines inherit
         severity = determine_severity(entry, container, message, self.last_level)
+        # matched against "app: message", before masking, so that a pattern
+        # can be limited to one program
+        shown = f"{app or NILVALUE}: {message}"
+        if any(pattern.search(shown) for pattern in self.cfg.exclude):
+            return None
+        message = self.redact(message)
         line = self.render(
             severity, entry_time(entry), self.cfg.hostname, app, procid, message
         )
@@ -382,25 +408,29 @@ class Transport:
                 last_error = err
         raise last_error
 
-    def peer_closed(self) -> bool:
+    def check_peer(self) -> None:
         """
         A syslog server never sends data: a readable stream socket means the
-        server closed the connection (or reset it). Checking before each send
-        avoids writing an entry into a connection that is already gone.
+        connection is over. Raise why: the server closed it (end of stream),
+        or the error the system recorded on it, such as a reset or the time-out
+        of data the server never acknowledged. Checking before each send avoids
+        writing an entry into a connection that is already gone.
         """
         try:
             readable, _, _ = select.select([self.sock], [], [], 0)
-            if not readable:
-                return False
-            return self.sock.recv(1) == b""
-        except (OSError, ValueError):
-            return True
+        except ValueError as err:  # descriptor already closed
+            raise ConnectionAbortedError("connection already closed") from err
+        if not readable:
+            return
+        # an error recorded on the connection is raised here, as it is
+        if self.sock.recv(1) == b"":
+            raise ConnectionResetError("connection closed by the server")
 
     def send(self, payload: bytes) -> None:
-        if self.sock is not None and self.cfg.stream and self.peer_closed():
+        if self.sock is not None and self.cfg.stream:
             # not reopened here: what the old connection did not get
             # acknowledged must be sent again first, which the caller does
-            raise ConnectionResetError("connection closed by the server")
+            self.check_peer()
         if self.sock is None:
             self.connect()
         if self.cfg.stream:
@@ -540,8 +570,14 @@ class Forwarder:
         self.position = Position(cfg)
         self.stopping = False
         self.down_since = None
+        # entries sent again during the current outage, said on return
+        self.resent = 0
+        # entries left out by exclude_patterns since the last report
+        self.excluded = 0
+        self.excluded_since = time.monotonic()
         # entries sent but not yet acknowledged, oldest first:
-        # (connection generation, end offset in its bytes, entry, payload)
+        # (connection generation, end offset in its bytes, entry, payload);
+        # an entry left out has no payload and waits only for those before it
         self.inflight = deque()
 
     def stop(self, *_args) -> None:
@@ -563,11 +599,27 @@ class Forwarder:
             return
         acknowledged = self.transport.sent_bytes - unacked
         while self.inflight:
-            generation, end, entry, _payload = self.inflight[0]
-            if generation != self.transport.generation or end > acknowledged:
+            generation, end, entry, payload = self.inflight[0]
+            if payload is not None and (
+                generation != self.transport.generation or end > acknowledged
+            ):
                 break
             self.inflight.popleft()
             self.position.advance(entry)
+
+    def count_excluded(self) -> None:
+        """Count an entry left out; say how many once per report period."""
+        self.excluded += 1
+        elapsed = time.monotonic() - self.excluded_since
+        if elapsed >= self.cfg.exclude_report_seconds:
+            noun = "entry" if self.excluded == 1 else "entries"
+            log(
+                "INFO",
+                f"excluded {self.excluded} {noun} matching exclude_patterns "
+                f"in the last {elapsed / 60:.0f} min",
+            )
+            self.excluded = 0
+            self.excluded_since = time.monotonic()
 
     def deliver(self, entry: dict) -> bool:
         """
@@ -575,10 +627,18 @@ class Forwarder:
         failure, the entries the server had not acknowledged are sent again
         first, in their order: a vanished server costs duplicates, not losses.
         """
-        queue = deque([(entry, self.formatter.payload(entry))])
+        payload = self.formatter.payload(entry)
+        if payload is None:
+            self.count_excluded()
+        queue = deque([(entry, payload)])
         delay = 1.0
         while queue:
             current, payload = queue[0]
+            if payload is None:  # left out: nothing to send, keep its place
+                queue.popleft()
+                self.inflight.append((None, None, current, None))
+                self.refresh_acks()
+                continue
             try:
                 self.transport.send(payload)
             except OSError as err:
@@ -587,6 +647,7 @@ class Forwarder:
                 queue.extendleft(
                     reversed([(e, p) for _gen, _end, e, p in self.inflight])
                 )
+                self.resent += sum(1 for item in self.inflight if item[3] is not None)
                 self.inflight.clear()
                 if self.down_since is None:
                     self.down_since = time.monotonic()
@@ -601,11 +662,17 @@ class Forwarder:
                 delay = min(delay * 2, self.cfg.retry_max_seconds)
                 continue
             if self.down_since is not None:
+                detail = ""
+                if self.resent:
+                    noun = "entry" if self.resent == 1 else "entries"
+                    detail = f" ({self.resent} {noun} not acknowledged, sent again)"
                 log(
                     "INFO",
-                    f"sending again after {time.monotonic() - self.down_since:.0f} s",
+                    f"sending again after {time.monotonic() - self.down_since:.0f} s"
+                    f"{detail}",
                 )
                 self.down_since = None
+                self.resent = 0
             queue.popleft()
             self.inflight.append(
                 (self.transport.generation, self.transport.sent_bytes, current, payload)

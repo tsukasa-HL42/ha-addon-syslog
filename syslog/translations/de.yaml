@@ -20,6 +20,9 @@ configuration:
   redact_patterns:
     name: Zu schwärzende Muster
     description: Reguläre Ausdrücke (Python-Syntax), deren Treffer vor dem Senden durch *** ersetzt werden, z. B. damit Tokens oder geheime URLs nicht im entfernten Syslog landen.
+  exclude_patterns:
+    name: Auszuschließende Muster
+    description: "Reguläre Ausdrücke (Python-Syntax), geprüft gegen „App-Name: Nachricht“; ein passender Eintrag wird nicht gesendet. Die App meldet stündlich, wie viele ausgelassen wurden. Ein ungültiges Muster stoppt die App."
   backlog_max_hours:
     name: Maximaler Rückstand (Stunden)
     description: Nach einem Stopp werden die seit dem letzten gesendeten Eintrag geschriebenen Einträge beim Neustart nachgesendet, höchstens so viele Stunden zurück. 0 beginnt am Ende des Journals.

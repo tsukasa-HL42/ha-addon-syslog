@@ -23,6 +23,7 @@ syslog_ssl: false
 syslog_ssl_verify: true
 syslog_format: rfc5424
 redact_patterns: []
+exclude_patterns: []
 backlog_max_hours: 6
 ```
 
@@ -35,13 +36,15 @@ backlog_max_hours: 6
 | `syslog_ssl_verify` | SSL verify | Whether or not to verify the ssl certificate. |
 | `syslog_format` | Syslog format | `rfc3164` (BSD syslog) or `rfc5424` (ISO 8601 timestamps with time zone, recommended). |
 | `redact_patterns` | Redact patterns | Regular expressions (Python syntax) whose matches are replaced by `***` before a message is sent. |
+| `exclude_patterns` | Exclude patterns | Regular expressions (Python syntax) matched against `app name: message`; a matching entry is not sent. |
 | `backlog_max_hours` | Maximum backlog | After a stop, how many hours back the app may resume (0 to 168). `0` always starts at the end of the journal. |
 
 ### What is sent
 
 - **Hostname**: the HAOS hostname (*Settings → System → Network*).
 - **App name**: the container name for containers (`homeassistant`,
-  `hassio_supervisor`, `app_…`), the syslog identifier for host programs.
+  `hassio_supervisor`, `app_…`), the syslog identifier for host programs,
+  or their process name when they set none.
 - **Process id**: the PID for host programs, `-` for containers (the journal
   only knows the PID of the Docker daemon).
 - **Severity**: the journal priority for host programs; for Home Assistant
@@ -93,12 +96,46 @@ second one keeps `token=` and masks only the value. Patterns are applied to
 the message text in the given order. An invalid pattern stops the app with an
 error, so no unmasked messages are sent.
 
+### Leaving entries out
+
+Some programs write lines that are known and useless, and that should not
+cost network and storage. `exclude_patterns` leaves them out on the Home
+Assistant host. Each pattern is searched in `app name: message` (the app name
+as sent: container name or program), before masking, so that a pattern can be
+limited to one program by starting with `^name: `. A matching entry is not
+sent, but still counts as done: the journal position moves past it, in order.
+
+Example: the hourly reverse lookup sweep that a Home Assistant integration
+sends without recursion, which a resolver refusing non-recursive queries
+answers with `REFUSED` (753 lines an hour on one host). Only that exact form
+is left out: the same lookup failing otherwise, asked with recursion, or from
+another program, is still sent.
+
+```yaml
+exclude_patterns:
+  - '^hassio_dns: \[INFO\] \S+ - \d+ "PTR IN [0-9.]+in-addr\.arpa\. udp \d+ false \d+" REFUSED qr,ra '
+```
+
+A left-out entry is invisible on the server by construction. The app writes
+once an hour, when it left something out, how many:
+`excluded 753 entries matching exclude_patterns in the last 60 min`. An
+invalid pattern stops the app with an error.
+
 ### App log
 
 The app writes one line when the server becomes unreachable and one when it
 is reachable again, never one per message, each starting with the time
 (`[18:38:57] WARNING: cannot send to ...`). These lines also reach the syslog
 server, under the app's container name.
+
+- `cannot send to host:port (reason)`: the reason is "connection closed by
+  the server" when the server ended the connection (a restart), otherwise
+  the system's error, for example `Connection timed out` when the server
+  vanished and stopped acknowledging data.
+- `sending again after N s (M entries not acknowledged, sent again)`: the
+  server is back; the M entries it had not acknowledged before the outage
+  were sent again, so it may hold some of them twice. Without parenthesis,
+  nothing had to be sent again.
 
 ## Origin
 

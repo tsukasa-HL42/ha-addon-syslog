@@ -20,6 +20,9 @@ configuration:
   redact_patterns:
     name: Motifs à masquer
     description: Expressions régulières (syntaxe Python) dont les correspondances sont remplacées par *** avant l'envoi, par exemple pour qu'un jeton ou une URL secrète ne quitte pas l'hôte. Un motif invalide arrête l'application.
+  exclude_patterns:
+    name: Motifs à écarter
+    description: "Expressions régulières (syntaxe Python) comparées à « nom de l'application: message » ; une entrée qui correspond n'est pas envoyée. L'application dit chaque heure combien elle en a écarté. Un motif invalide arrête l'application."
   backlog_max_hours:
     name: Rattrapage maximal (heures)
     description: Après un arrêt, les entrées écrites depuis la dernière envoyée sont envoyées au redémarrage, sur ce nombre d'heures au plus. 0 repart de la fin du journal.
