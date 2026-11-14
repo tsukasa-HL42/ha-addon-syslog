@@ -26,3 +26,6 @@ configuration:
   backlog_max_hours:
     name: Maximaler Rückstand (Stunden)
     description: Nach einem Stopp werden die seit dem letzten gesendeten Eintrag geschriebenen Einträge beim Neustart nachgesendet, höchstens so viele Stunden zurück. 0 beginnt am Ende des Journals.
+  max_message_bytes:
+    name: "Maximale Nachrichtengröße (Bytes)"
+    description: "Größte gesendete Syslog-Nachricht, einschließlich Header. Eine längere wird gekürzt und endet mit ...[truncated]. Auf den Wert einstellen, den der Server annimmt."

@@ -447,6 +447,68 @@ class UdpTests(Bench):
         self.assertTrue(any(m.endswith(" udp line") for m in self.receiver.messages))
 
 
+    def test_oversized_entry_does_not_block(self):
+        """An entry larger than a datagram is cut and the next ones still go."""
+        self.start()
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not self.receiver.messages:
+            self.append("udp line")
+            time.sleep(0.3)
+        self.append("big " + "x" * 70000)
+        self.append("after big")
+        ok = self.wait_until(
+            lambda: any(m.endswith(" after big") for m in self.receiver.messages)
+        )
+        self.assertTrue(ok, "blocked behind the oversized entry: " + self.output())
+        big = [m for m in self.receiver.messages if " big xxx" in m]
+        self.assertEqual(len(big), 1)
+        self.assertTrue(big[0].endswith(TRUNCATED), big[0][-40:])
+
+
+# -- message size --------------------------------------------------------------
+TRUNCATED = "...[truncated]"
+
+
+class SizeTests(Bench):
+    def setUp(self) -> None:
+        super().setUp()
+        self.extra_env["MAX_MESSAGE_BYTES"] = "1024"
+
+    def long_one(self) -> str:
+        self.wait_until(
+            lambda: any("long " in m for m in self.receiver.received())
+        )
+        found = [m for m in self.receiver.received() if "long " in m]
+        self.assertEqual(len(found), 1, self.output())
+        return found[0]
+
+    def test_long_message_cut_at_limit(self):
+        """A message over the limit is cut to it, marked, and stays valid."""
+        self.start_synced()
+        # two-byte characters: the cut must not split one
+        self.append("long " + "é" * 5000)
+        self.append("after long")
+        self.wait_for_bodies("after long")
+        message = self.long_one()
+        self.assertLessEqual(len(message.encode("utf-8")), 1024)
+        self.assertGreater(len(message.encode("utf-8")), 1000)
+        self.assertTrue(message.endswith(TRUNCATED), message[-40:])
+        self.assertNotIn("�", message)
+        self.assertEqual(parse(message)["app"], "test")
+
+    def test_message_at_limit_untouched(self):
+        self.start_synced()
+        self.append("long " + "y" * 300)
+        self.assertFalse(self.long_one().endswith(TRUNCATED))
+
+    def test_unusable_limit_stops_before_sending(self):
+        self.extra_env["MAX_MESSAGE_BYTES"] = "100"
+        proc = self.start()
+        self.assertEqual(proc.wait(timeout=10), 1)
+        self.assertIn("MAX_MESSAGE_BYTES", self.output())
+        self.assertEqual(self.receiver.received(), [])
+
+
 # -- secrets -------------------------------------------------------------------
 class RedactTests(Bench):
     def test_secrets_masked(self):
@@ -474,7 +536,7 @@ SWEEP_PATTERN = (
     r'^hassio_dns: \[INFO\] \S+ - \d+ "PTR IN [0-9.]+in-addr\.arpa\. '
     r'udp \d+ false \d+" REFUSED qr,ra '
 )
-SWEEP_LINE = ('[INFO] 172.30.32.1:41258 - 30575 "PTR IN 254.0.42.10.in-addr.arpa. '
+SWEEP_LINE = ('[INFO] 172.30.32.1:41258 - 30575 "PTR IN 254.2.0.192.in-addr.arpa. '
               'udp 42 false 512" REFUSED qr,ra 42 0.000428374s')
 
 
@@ -485,10 +547,10 @@ class ExcludeTests(Bench):
         self.start_synced()
         kept = {
             # the same lookup failing for another reason
-            '[INFO] 172.30.32.1:58204 - 34477 "PTR IN 1.0.42.10.in-addr.arpa. '
+            '[INFO] 172.30.32.1:58204 - 34477 "PTR IN 1.2.0.192.in-addr.arpa. '
             'udp 40 false 512" SERVFAIL qr 40 4.00107475s': "hassio_dns",
             # refused, but asked with recursion: a real problem
-            '[INFO] 172.30.32.1:1 - 2 "PTR IN 9.0.42.10.in-addr.arpa. '
+            '[INFO] 172.30.32.1:1 - 2 "PTR IN 9.2.0.192.in-addr.arpa. '
             'udp 40 false 512" REFUSED qr,rd,ra 40 0.0004s': "hassio_dns",
             # refused, another type of query
             '[INFO] 127.0.0.1:57739 - 19900 "NS IN . udp 17 false 512" '

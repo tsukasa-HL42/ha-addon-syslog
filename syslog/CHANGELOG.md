@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.1
+
+- A message longer than the new option `max_message_bytes` (8192 by
+  default) is cut to that size and ends with `...[truncated]`. Before, over
+  UDP, an entry larger than a datagram was refused by the system and tried
+  again for ever, with nothing sent behind it; over TCP, the size was left
+  to the server, which may drop the message or end the connection
+- TLS 1.3: the check made before each send took the session tickets a
+  server sends after the handshake for the end of the connection, waited
+  10 seconds and failed, about every other send. TLS connections are now
+  checked without waiting. The bench has TLS 1.2 and 1.3 tests
+- Test data uses documentation addresses only, and a test refuses any other
+  address in the repository
+
 ## 1.1.0
 
 - The reason given in `cannot send` is the real one: "connection closed by

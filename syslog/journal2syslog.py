@@ -114,6 +114,12 @@ OPENTHREAD_LEVELS = {"C": 2, "W": 4, "N": 5, "I": 6, "D": 7}
 ANSI_COLOR_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
 REDACT_REPLACEMENT = "***"
 
+# A message over the limit is cut and ends with this mark. The bounds: every
+# server accepts 480 bytes (RFC 5424), none more than one UDP datagram.
+TRUNCATED_MARK = b"...[truncated]"
+MAX_MESSAGE_BYTES_DEFAULT = 8192
+MAX_MESSAGE_BYTES_RANGE = (480, 65000)
+
 
 # -- configuration ------------------------------------------------------------
 @dataclass
@@ -129,6 +135,7 @@ class Config:
     exclude: list = field(default_factory=list)
     exclude_report_seconds: float = 3600
     backlog_max_hours: float = 6
+    max_message_bytes: int = MAX_MESSAGE_BYTES_DEFAULT
     state_dir: str = "/data"
     state_flush_seconds: float = 5
     retry_max_seconds: float = 60
@@ -167,6 +174,14 @@ def load_config(env=os.environ) -> Config:
     # left out
     redact = compile_patterns(env.get("REDACT_PATTERNS", ""), "redact")
     exclude = compile_patterns(env.get("EXCLUDE_PATTERNS", ""), "exclude")
+    max_message_bytes = int(
+        env.get("MAX_MESSAGE_BYTES") or MAX_MESSAGE_BYTES_DEFAULT
+    )
+    low, high = MAX_MESSAGE_BYTES_RANGE
+    if not low <= max_message_bytes <= high:
+        raise ValueError(
+            f"MAX_MESSAGE_BYTES is {max_message_bytes}, expected {low} to {high}"
+        )
     return Config(
         host=env["SYSLOG_HOST"],
         port=int(env["SYSLOG_PORT"]),
@@ -179,6 +194,7 @@ def load_config(env=os.environ) -> Config:
         exclude=exclude,
         exclude_report_seconds=float(env.get("EXCLUDE_REPORT_SECONDS", "3600")),
         backlog_max_hours=float(env.get("BACKLOG_MAX_HOURS", "6")),
+        max_message_bytes=max_message_bytes,
         state_dir=env.get("STATE_DIR", "/data"),
         state_flush_seconds=float(env.get("STATE_FLUSH_SECONDS", "5")),
         retry_max_seconds=float(env.get("RETRY_MAX_SECONDS", "60")),
@@ -327,7 +343,15 @@ class Formatter:
         line = self.render(
             severity, entry_time(entry), self.cfg.hostname, app, procid, message
         )
-        return line.encode("utf-8", errors="replace")
+        data = line.encode("utf-8", errors="replace")
+        limit = self.cfg.max_message_bytes
+        if len(data) > limit:
+            # a server drops or refuses an oversized message, and a datagram
+            # that does not fit is never sent: cut it, on a character boundary
+            kept = data[: limit - len(TRUNCATED_MARK)]
+            data = kept.decode("utf-8", errors="ignore").encode("utf-8")
+            data += TRUNCATED_MARK
+        return data
 
 
 # -- transport ----------------------------------------------------------------
@@ -422,8 +446,21 @@ class Transport:
             raise ConnectionAbortedError("connection already closed") from err
         if not readable:
             return
-        # an error recorded on the connection is raised here, as it is
-        if self.sock.recv(1) == b"":
+        if isinstance(self.sock, ssl.SSLSocket):
+            # readable may only mean TLS records without data, such as the
+            # session tickets a TLS 1.3 server sends after the handshake:
+            # read without waiting, so that they are taken in and no more
+            self.sock.settimeout(0)
+            try:
+                data = self.sock.recv(1)
+            except (ssl.SSLWantReadError, ssl.SSLWantWriteError, BlockingIOError):
+                return
+            finally:
+                self.sock.settimeout(SOCKET_TIMEOUT)
+        else:
+            # an error recorded on the connection is raised here, as it is
+            data = self.sock.recv(1)
+        if data == b"":
             raise ConnectionResetError("connection closed by the server")
 
     def send(self, payload: bytes) -> None:

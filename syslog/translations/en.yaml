@@ -26,3 +26,6 @@ configuration:
   backlog_max_hours:
     name: Maximum backlog (hours)
     description: After a stop, entries written since the last one sent are sent on restart, up to this many hours back. 0 starts at the end of the journal.
+  max_message_bytes:
+    name: "Maximum message size (bytes)"
+    description: "Largest syslog message sent, header included. A longer one is cut and ends with ...[truncated]. Set it to what the server accepts."

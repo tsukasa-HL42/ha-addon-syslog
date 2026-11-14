@@ -25,6 +25,7 @@ syslog_format: rfc5424
 redact_patterns: []
 exclude_patterns: []
 backlog_max_hours: 6
+max_message_bytes: 8192
 ```
 
 | key | name | description |
@@ -38,6 +39,7 @@ backlog_max_hours: 6
 | `redact_patterns` | Redact patterns | Regular expressions (Python syntax) whose matches are replaced by `***` before a message is sent. |
 | `exclude_patterns` | Exclude patterns | Regular expressions (Python syntax) matched against `app name: message`; a matching entry is not sent. |
 | `backlog_max_hours` | Maximum backlog | After a stop, how many hours back the app may resume (0 to 168). `0` always starts at the end of the journal. |
+| `max_message_bytes` | Maximum message size | Largest syslog message sent, in bytes, header included (480 to 65000). A longer one is cut and ends with `...[truncated]`. Set it to what the server accepts. |
 
 ### What is sent
 
@@ -57,6 +59,10 @@ backlog_max_hours: 6
   entries sent late keep their real time.
 - Colour codes are removed from container lines.
 - Over TCP, messages are framed by octet counting (RFC 6587).
+- A message longer than `max_message_bytes` is cut, on a character
+  boundary, and ends with `...[truncated]`. The default, 8192 bytes, is
+  what common servers accept without tuning; a container line is at most
+  16 KB (Docker splits longer ones), a host journal line can be longer.
 
 ### Resuming and its limits
 

@@ -22,6 +22,8 @@ EXCLUDE_PATTERNS=$(bashio::config 'exclude_patterns')
 export EXCLUDE_PATTERNS
 BACKLOG_MAX_HOURS=$(bashio::config 'backlog_max_hours' 6)
 export BACKLOG_MAX_HOURS
+MAX_MESSAGE_BYTES=$(bashio::config 'max_message_bytes' 8192)
+export MAX_MESSAGE_BYTES
 # persistent app storage: the journal position survives restarts
 export STATE_DIR=/data
 HAOS_HOSTNAME=$(bashio::info.hostname)

@@ -26,3 +26,6 @@ configuration:
   backlog_max_hours:
     name: Rattrapage maximal (heures)
     description: Après un arrêt, les entrées écrites depuis la dernière envoyée sont envoyées au redémarrage, sur ce nombre d'heures au plus. 0 repart de la fin du journal.
+  max_message_bytes:
+    name: "Taille maximale d'un message (octets)"
+    description: "Taille du plus grand message syslog envoyé, en-tête compris. Un message plus long est coupé et se termine par ...[truncated]. À régler sur ce que le serveur accepte."
