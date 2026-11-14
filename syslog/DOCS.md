@@ -123,7 +123,7 @@ exclude_patterns:
 ```
 
 A left-out entry is invisible on the server by construction. The app writes
-once an hour, when it left something out, how many:
+once an hour, when it left something out, and when it stops, how many:
 `excluded 753 entries matching exclude_patterns in the last 60 min`. An
 invalid pattern stops the app with an error.
 

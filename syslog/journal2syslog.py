@@ -647,16 +647,27 @@ class Forwarder:
     def count_excluded(self) -> None:
         """Count an entry left out; say how many once per report period."""
         self.excluded += 1
+        self.report_excluded()
+
+    def report_excluded(self, force: bool = False) -> None:
+        """
+        Say how many entries were left out since the last report, once the
+        period is over. Also called while the journal is quiet: a burst
+        followed by nothing must not wait for the next entry left out. On a
+        stop (force), what was counted is said at once.
+        """
         elapsed = time.monotonic() - self.excluded_since
-        if elapsed >= self.cfg.exclude_report_seconds:
+        if elapsed < self.cfg.exclude_report_seconds and not force:
+            return
+        if self.excluded:
             noun = "entry" if self.excluded == 1 else "entries"
             log(
                 "INFO",
                 f"excluded {self.excluded} {noun} matching exclude_patterns "
                 f"in the last {elapsed / 60:.0f} min",
             )
-            self.excluded = 0
-            self.excluded_since = time.monotonic()
+        self.excluded = 0
+        self.excluded_since = time.monotonic()
 
     def deliver(self, entry: dict) -> bool:
         """
@@ -745,8 +756,10 @@ class Forwarder:
                         return
                 self.refresh_acks()
                 self.position.flush()
+                self.report_excluded()
                 jr.wait(1)  # short wait: a stop request is seen quickly
         finally:
+            self.report_excluded(force=True)
             self.drain()
             self.position.flush(force=True)
             self.transport.close()

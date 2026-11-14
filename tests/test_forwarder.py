@@ -1009,6 +1009,37 @@ class AcknowledgementTests(unittest.TestCase):
         fwd.deliver(self._entry(2, "drop me"))
         self.assertEqual([m for m in messages if m.startswith("excluded")], [])
 
+    def test_lone_burst_reported_without_another_exclusion(self):
+        """
+        A burst left out, then nothing: the count is said once the period is
+        over, without waiting for the next entry left out (an hourly sweep
+        was only reported by the first entry of the following one).
+        """
+        messages = []
+        self.module.log = lambda level, message: messages.append(message)
+        fwd = self._excluding(report_seconds=0.2)
+        for index in range(3):
+            fwd.deliver(self._entry(index, "drop me"))
+        self.assertEqual([m for m in messages if m.startswith("excluded")], [])
+        time.sleep(0.3)
+        fwd.report_excluded()
+        reports = [m for m in messages if m.startswith("excluded")]
+        self.assertEqual(len(reports), 1, messages)
+        self.assertRegex(reports[0], r"^excluded 3 entries ")
+        fwd.report_excluded()
+        self.assertEqual(len([m for m in messages if m.startswith("excluded")]), 1)
+
+    def test_pending_count_said_on_stop(self):
+        """Entries left out since the last report are not lost on a stop."""
+        messages = []
+        self.module.log = lambda level, message: messages.append(message)
+        fwd = self._excluding(report_seconds=3600)
+        fwd.deliver(self._entry(0, "drop me"))
+        fwd.report_excluded(force=True)
+        reports = [m for m in messages if m.startswith("excluded")]
+        self.assertEqual(len(reports), 1, messages)
+        self.assertRegex(reports[0], r"^excluded 1 entry ")
+
     def test_resent_in_journal_order(self):
         """After a dead peer, waiting entries are sent again in their order."""
         fwd, link = self.forwarder, self.link

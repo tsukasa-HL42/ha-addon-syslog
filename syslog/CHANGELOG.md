@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.2
+
+- The hourly count of entries left out by `exclude_patterns` is written as
+  soon as the hour is over, and on a stop. Before, it was only written when
+  another entry was left out after that hour: a burst once an hour, such as
+  the reverse lookup sweep, was reported an hour late, by the first entry
+  of the next burst
+
 ## 1.1.1
 
 - A message longer than the new option `max_message_bytes` (8192 by
